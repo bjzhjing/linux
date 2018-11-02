@@ -34,6 +34,7 @@ struct sgx_epc_section {
 
 #define SGX_EPC_SECTION_MASK		GENMASK(7, 0)
 #define SGX_MAX_EPC_SECTIONS		(SGX_EPC_SECTION_MASK + 1)
+#define SGX_MAX_ADD_PAGES_LENGTH	0x100000
 
 extern struct sgx_epc_section sgx_epc_sections[SGX_MAX_EPC_SECTIONS];
 
