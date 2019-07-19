@@ -62,4 +62,7 @@ struct sgx_epc_page *__sgx_alloc_epc_page(void);
 struct sgx_epc_page *sgx_alloc_epc_page(void *owner, bool reclaim);
 void sgx_free_epc_page(struct sgx_epc_page *page);
 
+int sgx_set_attribute(unsigned long *allowed_attributes,
+		      unsigned int attribute_fd);
+
 #endif /* _X86_SGX_H */

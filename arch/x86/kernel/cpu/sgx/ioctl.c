@@ -769,27 +769,11 @@ out:
 static long sgx_ioc_enclave_provision(struct sgx_encl *encl, void __user *arg)
 {
 	struct sgx_enclave_provision params;
-	struct file *attribute_file;
-	int ret;
 
 	if (copy_from_user(&params, arg, sizeof(params)))
 		return -EFAULT;
 
-	attribute_file = fget(params.attribute_fd);
-	if (!attribute_file)
-		return -EINVAL;
-
-	if (attribute_file->f_op != &sgx_provision_fops) {
-		ret = -EINVAL;
-		goto out;
-	}
-
-	encl->attributes |= SGX_ATTR_PROVISIONKEY;
-	ret = 0;
-
-out:
-	fput(attribute_file);
-	return ret;
+	return sgx_set_attribute(&encl->attributes, params.attribute_fd);
 }
 
 long sgx_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
