@@ -848,6 +848,7 @@ out:
 	fput(attribute_file);
 	return ret;
 }
+EXPORT_SYMBOL_GPL(sgx_set_attribute);
 
 static void __init sgx_init(void)
 {
