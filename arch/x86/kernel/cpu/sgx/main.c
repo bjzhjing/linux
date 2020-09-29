@@ -308,20 +308,19 @@ out:
 }
 
 /*
- * Take a page from the head of the active page pool and swap it to the
- * enclave's private shmem file. Skip the page, if it has been accessed since
- * the last trial. Move a young page to the tail of active page pool so that the
- * pages get scanned in LRU like fashion.
- *
- * The algorithm goes through a fixed number of pages, and if no aged victim has
- * been found, it will return NULL. Otherwise, a freed page is returned.
+ * Take a fixed number of pages from the head of the active page pool and
+ * reclaim them to the enclave's private shmem files. Skip the pages, which have
+ * been accessed since the last scan. Move those pages to the tail of active
+ * page pool so that the pages get scanned in LRU like fashion.
  */
-static struct sgx_epc_page *sgx_reclaim_epc_page(void)
+static void sgx_reclaim_pages(void)
 {
-	struct sgx_epc_page *epc_page = NULL;
+	struct sgx_epc_page *chunk[SGX_NR_TO_SCAN];
+	struct sgx_backing backing[SGX_NR_TO_SCAN];
 	struct sgx_epc_section *section;
 	struct sgx_encl_page *encl_page;
-	struct sgx_backing backing;
+	struct sgx_epc_page *epc_page;
+	int cnt = 0;
 	int ret;
 	int i;
 
@@ -336,52 +335,67 @@ static struct sgx_epc_page *sgx_reclaim_epc_page(void)
 		encl_page = epc_page->owner;
 
 		if (kref_get_unless_zero(&encl_page->encl->refcount) != 0)
-			break;
-
-		/* The owner is freeing the page. No need to add the page back
-		 * to the list of reclaimable pages.
-		 */
-		epc_page->desc &= ~SGX_EPC_PAGE_RECLAIMABLE;
-		epc_page = NULL;
+			chunk[cnt++] = epc_page;
+		else
+			/* The owner is freeing the page. No need to add the
+			 * page back to the list of reclaimable pages.
+			 */
+			epc_page->desc &= ~SGX_EPC_PAGE_RECLAIMABLE;
 	}
 	spin_unlock(&sgx_active_page_list_lock);
 
-	if (!epc_page)
-		return NULL;
+	for (i = 0; i < cnt; i++) {
+		epc_page = chunk[i];
+		encl_page = epc_page->owner;
 
-	if (!sgx_reclaimer_age(epc_page))
-		goto skip;
+		if (!sgx_reclaimer_age(epc_page))
+			goto skip;
 
-	ret = sgx_encl_get_backing(encl_page->encl,
-				   SGX_ENCL_PAGE_INDEX(encl_page), &backing);
-	if (ret)
-		goto skip;
+		ret = sgx_encl_get_backing(encl_page->encl,
+					   SGX_ENCL_PAGE_INDEX(encl_page),
+					   &backing[i]);
+		if (ret)
+			goto skip;
 
-
-	mutex_lock(&encl_page->encl->lock);
-	encl_page->desc |= SGX_ENCL_PAGE_BEING_RECLAIMED;
-	mutex_unlock(&encl_page->encl->lock);
-
-	sgx_reclaimer_block(epc_page);
-
-	sgx_reclaimer_write(epc_page, &backing);
-	sgx_encl_put_backing(&backing, true);
-
-	kref_put(&encl_page->encl->refcount, sgx_encl_release);
-	epc_page->desc &= ~SGX_EPC_PAGE_RECLAIMABLE;
-
-	section = sgx_get_epc_section(epc_page);
-
-	return epc_page;
+		mutex_lock(&encl_page->encl->lock);
+		encl_page->desc |= SGX_ENCL_PAGE_BEING_RECLAIMED;
+		mutex_unlock(&encl_page->encl->lock);
+		continue;
 
 skip:
-	spin_lock(&sgx_active_page_list_lock);
-	list_add_tail(&epc_page->list, &sgx_active_page_list);
-	spin_unlock(&sgx_active_page_list_lock);
+		spin_lock(&sgx_active_page_list_lock);
+		list_add_tail(&epc_page->list, &sgx_active_page_list);
+		spin_unlock(&sgx_active_page_list_lock);
 
-	kref_put(&encl_page->encl->refcount, sgx_encl_release);
+		kref_put(&encl_page->encl->refcount, sgx_encl_release);
 
-	return NULL;
+		chunk[i] = NULL;
+	}
+
+	for (i = 0; i < cnt; i++) {
+		epc_page = chunk[i];
+		if (epc_page)
+			sgx_reclaimer_block(epc_page);
+	}
+
+	for (i = 0; i < cnt; i++) {
+		epc_page = chunk[i];
+		if (!epc_page)
+			continue;
+
+		encl_page = epc_page->owner;
+		sgx_reclaimer_write(epc_page, &backing[i]);
+		sgx_encl_put_backing(&backing[i], true);
+
+		kref_put(&encl_page->encl->refcount, sgx_encl_release);
+		epc_page->desc &= ~SGX_EPC_PAGE_RECLAIMABLE;
+
+		section = sgx_get_epc_section(epc_page);
+		spin_lock(&section->lock);
+		list_add_tail(&epc_page->list, &section->page_list);
+		section->free_cnt++;
+		spin_unlock(&section->lock);
+	}
 }
 
 
@@ -431,7 +445,6 @@ static bool sgx_should_reclaim(unsigned long watermark)
 
 static int ksgxswapd(void *p)
 {
-	struct sgx_epc_page *page;
 	int i;
 
 	set_freezable();
@@ -463,11 +476,8 @@ static int ksgxswapd(void *p)
 				     kthread_should_stop() ||
 				     sgx_should_reclaim(SGX_NR_HIGH_PAGES));
 
-		if (sgx_should_reclaim(SGX_NR_HIGH_PAGES)) {
-			page = sgx_reclaim_epc_page();
-			if (page)
-				sgx_free_epc_page(page);
-		}
+		if (sgx_should_reclaim(SGX_NR_HIGH_PAGES))
+			sgx_reclaim_pages();
 
 		cond_resched();
 	}
@@ -572,10 +582,7 @@ struct sgx_epc_page *sgx_alloc_epc_page(void *owner, bool reclaim)
 			break;
 		}
 
-		entry = sgx_reclaim_epc_page();
-		if (entry)
-			break;
-
+		sgx_reclaim_pages();
 		schedule();
 	}
 
