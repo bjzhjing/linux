@@ -763,7 +763,7 @@ static long sgx_ioc_enclave_provision(struct sgx_encl *encl, void __user *arg)
 		goto out;
 	}
 
-	encl->attributes |= SGX_ATTR_PROVISIONKEY;
+	encl->attributes_mask |= SGX_ATTR_PROVISIONKEY;
 	ret = 0;
 
 out:
