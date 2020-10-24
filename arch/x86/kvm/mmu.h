@@ -95,7 +95,7 @@ static inline void kvm_mmu_load_pgd(struct kvm_vcpu *vcpu)
 	if (!VALID_PAGE(root_hpa))
 		return;
 
-	kvm_x86_ops.load_mmu_pgd(vcpu, root_hpa | kvm_get_active_pcid(vcpu),
+	kvm_x86_ops.load_mmu_pgd(vcpu, root_hpa,
 				 vcpu->arch.mmu->shadow_root_level);
 }
 
